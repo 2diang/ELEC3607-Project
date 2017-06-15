@@ -1,0 +1,567 @@
+#include <LiquidCrystal.h>
+LiquidCrystal lcd(8, 9, 4, 5, 6, 7); // define pin connection
+#define blueToothSerial   Serial2     //set serial2(USART1) as blueToothSerial
+/****************************data zone***************************************/
+
+char recvChar[150] = {};  // received string(big enough to avoid pointer overflow)
+char CONOK[] = "E:4";
+char DISCON[] = "E:1";
+char DONE[] = "DONE";
+char in[] = "in";
+char out[] = "out";
+char RET[] = "return";
+//CONN
+String InOrOut = "would you like to drive in or out?\r\nplease send 'in' or 'out'";
+//PICK
+String welcome = "welcome to ZZ parking";
+String spaceAvai = "the available space:";
+String noSpace = "sorry, there is no available space, please try latter";
+String chooseSpace = "plaese choose a room you want to park in";
+String invalidSpace = "your selection is invaild, please re-enter it";
+//PIN
+String creatPIN = "enter a 4-digital PIN for your room:";
+//IN
+String success = "your reservation has been successful";
+String yourRmNum = "your room number is:  ";
+String yourRmPIN = "your room PIN is  ";
+String entering = "now, you can come in and parking";
+String startCount = "your car has been well parked, the timer starts now and will be stop when you get back";
+//String doneParking = " send DONE when you complete parking ";
+//AUTH1
+String askRmNum = "please send your room number";
+String invalidRmNum = "this is not a valid room,please send again";
+//AUTH2
+String askPIN = "plaese send your PIN:";
+String invalidPIN = "the PIN do not match the room,plaese send again";
+//PAY
+String payment = "the payment is  ";
+//OUT
+String Exit = "now,you can drive away, thanks for using, have a nice day !";
+//String doneOut = "send DONE when you drive out";
+/****************************datasheet******************************************/
+
+#define MaxRmNum 3    // parking palces = MaxRmNum+1 
+int AVARM[MaxRmNum + 2]; // array to save the available room munbers
+#define MaxPINLength 10 // 
+#define AVA  0    // available
+#define UAV  1    // unavailable
+#define price 1  //  one dollar per minnute
+enum prkingStatues
+{
+  IDLE = 0U,
+  CONN,
+  //move in
+  PICK,
+  PIN,
+  IN,
+  //move out
+  AUTH1,
+  AUTH2,
+  PAY,
+  OUT,
+  DISC,
+} PS = IDLE;
+/****************************data_operation*************************************/
+int num = -1; //room number
+struct park
+{
+  int r_number;     // room number
+  long r_PIN;      // room PIN, created by user to identify other users.
+  int r_Status;       //Status=1, unavailable; Status=0 available
+  unsigned long r_timer_begin; // start time
+  unsigned long r_timer_end;   // end time
+  long bill;  // payment
+};
+struct park space[MaxRmNum + 1]; // parking palces = MaxRmNum+1
+void space_ini()
+{
+  for (int i = 0; i <= MaxRmNum; i++)
+  {
+    space[i].r_number = i;
+    space[i].r_Status = AVA;
+    space[i].r_PIN = 0;
+    space[i].r_timer_begin = 0;
+    space[i].r_timer_end = 0;
+  }
+}
+int getRmStatus(int i)     // i means the room number
+{
+  return space[i].r_Status;
+}
+long getRmPIN(int i)       // i means the room number
+{
+  return space[i].r_PIN;
+}
+long getRmBill(int i)     //i means the room number
+{
+  long time_diff;
+  time_diff = space[i].r_timer_end - space[i].r_timer_begin;
+  return time_diff / 1000 / 60 * price;  // one dollar per minute
+}
+void giveRmStatus(int i, int j)
+{
+  if (i <= MaxRmNum)   // make sure the room number is vaild
+    space[i].r_Status = j;
+}
+void giveRmPIN(int i, long j)
+{
+  if (i <= MaxRmNum)  // make sure the room number is vaild
+    space[i].r_PIN = j;
+}
+void giveRmT1(int i, unsigned long j)
+{
+  if (i <= MaxRmNum)  // make sure the room number is vaild
+    space[i].r_timer_begin = j;
+}
+void giveRmT2(int i, unsigned long j)
+{
+  if (i <= MaxRmNum)  // make sure the room number is vaild
+    space[i].r_timer_end = j;
+}
+void freshAvaRm() // find which room is available, results is saved in a array.
+{
+  int j = 0;
+  for (int i = 0; i <= MaxRmNum; i++)
+  {
+    if (space[i].r_Status == AVA) // record available room munber sequencely
+    {
+      AVARM[j] = space[i].r_number;
+      j++;
+      // Serial.println(AVARM[j]);
+    }
+  }
+  AVARM[j] = MaxRmNum + 100; // add a impossible room number at the end
+}
+int ifAvaRm(int i)  // to test whether the room i is available
+{
+
+  freshAvaRm();
+  int j = 0; //array index of AVARM
+  while (AVARM[j] <= MaxRmNum)
+  {
+    if (AVARM[j] == i)    // find number from the list
+      return 1;
+    else
+      j++;
+  }
+  return 0;
+}
+
+/****************************BLUETOOTH******************************************/
+void BT_ini()
+{
+  blueToothSerial.begin(38400);                           // Set BluetoothBee BaudRate to default baud rate 38400
+  blueToothSerial.print("\r\n+STWMOD=0\r\n");             // set the bluetooth work in slave mode
+  blueToothSerial.print("\r\n+STNA=PARKING\r\n");    // set the bluetooth PIN as "SeeedBTSlave"
+  blueToothSerial.print("\r\n+STOAUT=1\r\n");             // Permit Paired device to connect me
+  blueToothSerial.print("\r\n+STAUTO=0\r\n");             // Auto-connection should be forbidden here
+  //blueToothSerial.print("\r\n+STPIN=2222\r\n");
+  blueToothSerial.print("\r\n+DLPIN\r\n");           //delete pin
+  delay(2000);                                            // This delay is required.
+  blueToothSerial.print("\r\n+INQ=1\r\n");                // make the slave bluetooth inquirable
+  Serial.println("The slave bluetooth is inquirable!");
+  delay(2000);                                            // This delay is required.
+  blueToothSerial.flush();
+  delay(3000);
+
+}
+int hear(void) // whether there is a message or not
+{
+  return blueToothSerial.available();
+}
+void recvData() //   receive data
+{
+  ;
+  int i = 0;                       // array index of recvdata
+  delay(20);
+  while (blueToothSerial.available())   //receive string
+  {
+    delay(20);
+    recvChar[i] =  blueToothSerial.read();
+    i++;
+  }
+  delay(20);
+  recvChar[i] = '\0';  // add a '\0' at the end
+
+}
+
+int hearStr(char *str) // find the str in the recvdata :0 - no; 1-yes
+{
+  int i = 0; // index of recieved string
+  int j = 0; // index of aim string
+  while ((str[i] != '\0') && (recvChar[j] != '\0')) //both two strings are not to the end
+  {
+    if (recvChar[j] == str[i]) // find a same character
+    {
+      i++; // move to the mext character to test
+      if (str[i] == '\0') // next one is the end means the aim str has been found
+        return 1;         //found aim str
+    }
+    else if (recvChar[j] != str[i - 1]) //in case current one the the real head(find abc from aabc)
+      i = 0;
+    j++; // data string keeps moving
+    //Serial.print(recvChar);
+  }
+  return 0;                     //  out of while means string not found
+}
+int hearNum() // find the first number in a str and return it in integer form
+{
+  int i = 0; // index of recieved string
+  long number = 0; // the result
+  while (recvChar[i] != '\0') // the string is not to the end
+  {
+    if ((recvChar[i] >= '0') && (recvChar[i] <= '9')) //find a number
+    {
+      number = number + ((int)recvChar[i] - 48); // ASCII to integer
+      if ((recvChar[i + 1] < '0') || (recvChar[i + 1] > '9')) // next one is not a munber
+        return number;                  // stop finding
+      number = number * 10; // carry
+    }
+    i++; // data string keeps moving
+  }
+  return -1; // not found a number
+}
+void speakln(String str)
+{
+  blueToothSerial.println(str); // print string to cellphone via BT
+  delay(30);
+}
+void speak(String str)
+{
+  blueToothSerial.print(str);
+  delay(30);
+}
+void speakln(int number)
+{
+  blueToothSerial.println(number);
+  delay(30);
+}
+void speak(int number)
+{
+  blueToothSerial.print(number);
+  delay(300);
+}
+void speakInfo()  // print parking information
+{
+  freshAvaRm(); // receive available parking from datasheet
+  //Serial.println(AVARM[i]);
+  speakln(welcome);
+  speakln(spaceAvai);
+  int i = 0;
+  while (AVARM[i] <= MaxRmNum) // print available room numbers
+  {
+    speak(AVARM[i]);
+    speak("  ");
+    i++;
+  }
+  speak("\r\n");
+}
+void speakSuccess()
+{
+  speakln(success);
+  speak(yourRmNum);
+  speak(num);
+  speakln(" ");
+  speak(yourRmPIN);
+  speak(getRmPIN(num));
+  speakln(" ");
+}
+void reBoost()
+{
+  blueToothSerial.print("\r\n+INQ=0\r\n");
+  delay(100);
+  BT_ini();
+}
+/****************************stepper*********************************************/
+#define STEPPER_GATE 22   // gate stepper
+#define STEPPER0 23 // differences with physical pin of stepper 
+void stepperUp(int x)  // stepper spins +90 degrees
+{
+  int pin = x + STEPPER0;
+  for (int i = 0; i < 100; i++) // i means spinning time
+  {
+    digitalWrite(pin, LOW);
+    delay(18);             // duty = 2/(18+2) = 90
+    digitalWrite(pin, HIGH);
+    delay(2);
+  }
+}
+void stepperDown(int x)  // stepper returns 0 degrees
+{
+  int pin = x + STEPPER0;
+  for (int i = 0; i < 100; i++) // i means spinning time
+  {
+    digitalWrite(pin, LOW);
+    delay(19);            // duty = 1/(19+1)
+    digitalWrite(pin, HIGH);
+    delay(1);
+  }
+}
+void stepper_ini()   // initialize stepper
+{
+  pinMode(STEPPER_GATE, OUTPUT);
+  for (int i = 0; i <= MaxRmNum ; i++)
+    pinMode((i + STEPPER0), OUTPUT);
+  for (int i = 0; i <= MaxRmNum ; i++)
+    stepperDown(i);
+  stepperDown(-1);
+}
+/****************************LCD*************************************************/
+void LCD_ini()
+{
+  lcd.begin(16, 2);             // size :1602
+  lcd.setCursor(0, 0);
+  lcd.print("available spaces::"); // first line
+}
+void LCD_dispaly()
+{
+  freshAvaRm();
+  int i = 0; //index of available room
+  int j = 3; // index of cursor
+  while (AVARM[i] <= MaxRmNum)
+  {
+    i++;
+  }
+  //Serial.println(i);
+  lcd.setCursor(1, j);
+  lcd.print(i);
+}
+
+/****************************LED*************************************************/
+#define LED0 43
+void LED_ini()
+{
+  for (int i = 0; i <= MaxRmNum; i++)
+  {
+    pinMode(i + LED0, OUTPUT);
+  }
+}
+void LED_on(int x)
+{
+  int pin = x + LED0;
+  digitalWrite(pin, HIGH);
+}
+void LED_off(int x)
+{
+  int pin = x + LED0;
+  digitalWrite(pin, LOW);
+}
+/****************************BUTTON****************************************/
+#define BUTTON 27 // pin of button
+void button_ini()
+{
+  pinMode(BUTTON, INPUT);
+}
+/****************************light detection**********************************/
+#define light0 A0
+int light(int x)   // test if light is shaded
+{
+  int i;
+  i = analogRead(light0 + x);
+  // 0-0
+  //3.3-1000
+  Serial.println(i);
+  if (i > 700) // less than 300 means no shade
+    return 0;
+  else
+    return 1;
+}
+
+/****************************FSM*****************************************/
+void FSM()//FSM
+{
+  delay(20);
+  switch (PS)
+  {
+    case IDLE:
+      { Serial.println("IDLE"); // for test
+        if (hearStr(CONOK))    // connection successfull!!
+        {
+          PS = CONN;
+          //operations for CONN
+          speakln(InOrOut);
+        }
+        break;
+      }
+    case CONN:
+      { Serial.println("CONN");// for test
+        if (hearStr(in))   //hear in, turn to PICK
+        {
+          PS = PICK;
+          // operations for PICK
+          speakInfo();    // show basic information
+          freshAvaRm();    //get available room numbers
+          if (AVARM[0] > MaxRmNum) // no place to park
+          {
+            speakln(noSpace);
+            PS = DISC; // to DISC
+            break;
+          }
+          speakln(chooseSpace); // (else)there is a available space
+        }
+        if (hearStr(out))   //hear out, turn to AUTH1
+        {
+          PS = AUTH1;
+          // operations for AUTH1
+          speakln(askRmNum);
+        }
+        break;
+      }
+    case PICK:
+      { Serial.println("PICK");// for test
+        num = hearNum();
+        if (ifAvaRm(num) == 1) // valid number
+        {
+          PS = PIN;
+          // operations for PIN
+          speakln(creatPIN);
+          break;
+        }
+        else                 // invalid
+        {
+          speakln(invalidSpace);
+        }
+        if (hearStr(RET)) //return to last step
+        {
+          PS = CONN;
+        }
+        break;
+      }
+    case PIN:
+      { Serial.println("PIN");// for test
+        long pin = hearNum();
+        if (pin != -1)             // valid PIN
+        {
+          Serial.println("LCD fresh\r\ndoors open\r\n");// for test
+          giveRmPIN(num, pin);    // save PIN
+          giveRmStatus(num, UAV); // set room as UAV
+          LCD_dispaly();
+          PS = DISC;              // to IN
+          // operations for IN
+          speakSuccess();
+          stepperUp(-1);  // open gate
+          stepperUp(num); // open doors
+          speakln(entering);
+          while (light(num)) // keep LED on before the car is in its position
+          {
+            Serial.println("waiting");// for test
+            LED_on(num);
+          }        stepperDown(-1);  // close gate
+          stepperDown(num); // close door
+          speakln(startCount);
+          giveRmT1(num, millis()); // timer start
+        }
+        if (hearStr(RET)) //return to last step
+        {
+          PS = PICK;
+        }
+        break;
+      }
+    case AUTH1:
+      { Serial.println("AUTH1");// for test
+        num = (int)hearNum();
+        if ((ifAvaRm(num) == 0) && (num <= MaxRmNum) && (num >= 0)) // valid number for leaving
+        {
+          PS = AUTH2;
+          // operations for AUTH2
+          speakln(askPIN);
+          break;
+        }
+        else
+        {
+          speakln(invalidRmNum);
+        }
+        break;
+      }
+    case AUTH2:
+      { Serial.println("AUTH2");// for test
+        long pin = hearNum();
+        if (getRmPIN(num) == pin)           // valid PIN
+        {
+          PS = PAY;
+          // operations for PAY
+          giveRmT2(num, millis());
+          speak(payment);
+          speak(getRmBill(num));
+          speakln("  dollars");
+          speakln("press button or sent anything to simulate to pay");
+          break;
+        }
+        else
+        {
+          speakln(invalidPIN);
+        }
+        break;
+      }
+    case PAY:
+      { Serial.println("PAY");// for test
+        if (digitalRead(!BUTTON))  // button or messages
+        {
+          Serial.println("LED fresh\r\ndoors open ");// for test
+          stepperUp(-1);            // open gate
+          stepperUp(num);           // open door
+          LED_on(num);
+          speakln(Exit);             // operations for OUT
+          giveRmStatus(num, AVA);    // set room as AVA
+          LCD_dispaly();
+          PS = DISC;                 // to DISC
+        }
+        break;
+      }
+    case DISC:
+      { Serial.println("DISC");  // for test
+        Serial.println("doors close\r\nLED off");// for test
+        stepperDown(-1);  // close gate
+        stepperDown(num); // close door
+        LED_off(num);
+        num = -1;
+        PS = IDLE;
+        reBoost();
+        break;
+      }
+  }
+}
+void DATA_display() // for test
+{
+  for (int i = 0; i <= MaxRmNum; i++)
+  {
+    Serial.print(space[i].r_number);
+    Serial.print("  ");
+    Serial.print(space[i].r_PIN);
+    Serial.print("  ");
+    Serial.print(space[i].r_Status);
+    Serial.println();
+  }
+}
+void setup()
+{
+  Serial.begin(9600);// for test
+  BT_ini();
+  space_ini();
+  stepper_ini();
+  LCD_ini();
+  LCD_dispaly();
+  LED_ini();
+  button_ini();
+  PS = IDLE;
+  num = -1;
+}
+void loop()
+{
+  if (hear())
+  {
+    recvData();
+    Serial.print(recvChar); //for test
+    delay(1000);
+    if (hearStr(DISCON))     // (we receive DISCON when normal set up as well)
+    {
+      if (PS != IDLE ) // abnormal exit
+      {
+        PS = DISC;
+      }
+    }
+    FSM();
+  }
+  if ((PS == PAY) && (digitalRead(!BUTTON))) // simulate the transaction by pushing the button
+    FSM();
+}
