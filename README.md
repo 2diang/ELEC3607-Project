@@ -11,3 +11,5 @@ C.Before drivers come into the garage, they can connecting to park system (by wi
 D.When the car enter the garage, the LEDs will guide the driver to the destination.  
 E.After the driver reserve the space and send the arrival confirmation, the system will start time counting and the corresponding door will open until the driver leave the garage.
 F.When the driver comes back and asks for the bill, the system send the charge information. After the payment confirmation, the door opens and the driver can drive away. 
+
+Video presentation YouTube link: https://www.youtube.com/watch?v=Xra-iXl4fx8
